@@ -721,7 +721,6 @@ void streamTask(void *pvParameters) {
         continue;
       }
       streamClientCount++;
-      client.setNoDelay(true);
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
       client.println();
@@ -735,12 +734,6 @@ void streamTask(void *pvParameters) {
         if (!client.connected()) {
           esp_camera_fb_return(fb);
           break;
-        }
-        size_t headerLen = 64 + String(fb->len).length();
-        if (client.availableForWrite() < (int)(fb->len + headerLen)) {
-          esp_camera_fb_return(fb);
-          delay(5);
-          continue;
         }
         client.print("--frame\r\n");
         client.print("Content-Type: image/jpeg\r\n");
