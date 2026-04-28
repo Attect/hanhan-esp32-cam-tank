@@ -181,13 +181,15 @@ void setFrameSize(framesize_t size) {
 void checkAutoQuality() {
   if (!autoQuality) return;
   static unsigned long lastCheck = 0;
+  static unsigned long lastSwitch = 0;
   if (millis() - lastCheck < 500) return;
   lastCheck = millis();
 
   bool shouldLow = isMovingFlag || (millis() - lastMoveTime < 1500);
   framesize_t target = shouldLow ? FRAMESIZE_QVGA : manualFrameSize;
-  if (target != currentFrameSize) {
+  if (target != currentFrameSize && millis() - lastSwitch > 3000) {
     setFrameSize(target);
+    lastSwitch = millis();
   }
 }
 
@@ -444,7 +446,7 @@ body{background:#0a0a0a;color:#fff;font-family:sans-serif;height:100vh;overflow:
 .side{width:110px;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:6px 2px}
 #videoWrap{flex:1;display:flex;align-items:center;justify-content:center;background:#000;position:relative}
 #video{width:100%;height:100%;object-fit:contain}
-.trackBtn{width:76px;height:52px;border:1px solid #444;background:#222;color:#fff;border-radius:8px;font-size:22px;line-height:52px;text-align:center;cursor:pointer}
+.trackBtn{width:76px;height:52px;border:1px solid #444;background:#222;color:#fff;border-radius:8px;font-size:22px;line-height:52px;text-align:center;cursor:pointer;touch-action:manipulation}
 .trackBtn:active{background:#444}
 #joyWrap{width:100px;height:100px;border:2px solid rgba(255,255,255,0.25);border-radius:50%;position:relative;touch-action:none}
 #joyKnob{width:40px;height:40px;background:rgba(255,255,255,0.5);border-radius:50%;position:absolute;left:30px;top:30px;touch-action:none}
@@ -516,8 +518,26 @@ function wsSend(s){if(ws&&ws.readyState==1)ws.send(s);}
 let motorL=0,motorR=0,shovelVal=50;
 let keys={};
 let lastSent='';
+let lastInputSrc=null;
+
+function applySteeringCurve(dx,dy){
+  const d=Math.hypot(dx,dy);
+  if(d<0.001)return{dx:0,dy:0};
+  const deg=Math.atan2(Math.abs(dx),dy)*180/Math.PI;
+  let mappedDeg;
+  if(deg<=70){mappedDeg=deg*45/70;}
+  else{mappedDeg=45+(deg-70)*45/20;}
+  const sign=dx>=0?1:-1;
+  return{
+    dx:sign*d*Math.sin(mappedDeg*Math.PI/180),
+    dy:d*Math.cos(mappedDeg*Math.PI/180)
+  };
+}
 
 function sendState(){
+  if(lastInputSrc===null && (keys['w']||keys['a']||keys['s']||keys['d'])){
+    updateKeyMotor();
+  }
   const s=`M,${motorR},${motorL}|S,${shovelVal}`;
   if(s!==lastSent){lastSent=s;wsSend(`M,${motorR},${motorL}`);wsSend(`S,${shovelVal}`);}
 }
@@ -527,18 +547,20 @@ setInterval(sendState,50);
 const joyWrap=document.getElementById('joyWrap');
 const joyKnob=document.getElementById('joyKnob');
 let joyId=null;
-function joyReset(){joyKnob.style.left='30px';joyKnob.style.top='30px';motorL=0;motorR=0;}
+function joyReset(){joyKnob.style.left='30px';joyKnob.style.top='30px';if(lastInputSrc==='joy'){motorL=0;motorR=0;lastInputSrc=null;}}
 function joyMove(cx,cy){
   const rect=joyWrap.getBoundingClientRect();
   let x=cx-rect.left-50,y=cy-rect.top-50;
   const dist=Math.hypot(x,y),max=35;
   if(dist>max){x=x/dist*max;y=y/dist*max;}
   joyKnob.style.left=(30+x)+'px';joyKnob.style.top=(30+y)+'px';
-  const dx=x/max,dy=-y/max;
-  let left=Math.round((dy+dx)*255),right=Math.round((dy-dx)*255);
+  const rawDx=x/max,rawDy=-y/max;
+  const curved=applySteeringCurve(rawDx,rawDy);
+  let left=Math.round((curved.dy+curved.dx)*255),right=Math.round((curved.dy-curved.dx)*255);
   left=Math.max(-255,Math.min(255,left));
   right=Math.max(-255,Math.min(255,right));
   motorL=left;motorR=right;
+  lastInputSrc='joy';
 }
 joyWrap.addEventListener('touchstart',e=>{e.preventDefault();const t=e.changedTouches[0];if(joyId==null)joyId=t.identifier;joyMove(t.clientX,t.clientY);}, {passive:false});
 joyWrap.addEventListener('touchmove',e=>{e.preventDefault();for(let t of e.changedTouches){if(t.identifier==joyId)joyMove(t.clientX,t.clientY);}}, {passive:false});
@@ -570,13 +592,16 @@ window.addEventListener('mouseup',()=>{if(shovelId=='mouse')shovelId=null;});
 // === 单侧履带按钮 ===
 function btnSetup(id,side,dir){
   const el=document.getElementById(id);
-  let val=0;
+  let val=0,active=false;
   function set(v){val=v;if(side=='L')motorL=val;else motorR=val;}
-  el.addEventListener('touchstart',e=>{e.preventDefault();set(dir*255);}, {passive:false});
-  el.addEventListener('touchend',e=>{e.preventDefault();set(0);}, {passive:false});
-  el.addEventListener('mousedown',()=>set(dir*255));
-  el.addEventListener('mouseup',()=>set(0));
-  el.addEventListener('mouseleave',()=>set(0));
+  function start(){if(!active){active=true;set(dir*255);lastInputSrc='btn';}}
+  function end(){if(active){active=false;set(0);if(lastInputSrc==='btn')lastInputSrc=null;}}
+  el.addEventListener('touchstart',e=>{e.preventDefault();start();},{passive:false});
+  el.addEventListener('touchend',e=>{e.preventDefault();end();},{passive:false});
+  el.addEventListener('touchcancel',e=>{end();});
+  el.addEventListener('mousedown',()=>start());
+  el.addEventListener('mouseup',()=>end());
+  el.addEventListener('mouseleave',()=>end());
 }
 btnSetup('blU','L',1);btnSetup('blD','L',-1);
 btnSetup('brU','R',1);btnSetup('brD','R',-1);
@@ -640,6 +665,11 @@ function updateKeyMotor(){
   motorR=Math.round((dy-dx)*255);
   motorL=Math.max(-255,Math.min(255,motorL));
   motorR=Math.max(-255,Math.min(255,motorR));
+  if(motorL!==0||motorR!==0||keys['arrowup']||keys['arrowdown']){
+    lastInputSrc='key';
+  } else if(lastInputSrc==='key'){
+    lastInputSrc=null;
+  }
 }
 
 // === 手柄 (Gamepad API) ===
@@ -653,12 +683,18 @@ function pollPad(){
     function dz(v,t=0.15){return Math.abs(v)<t?0:(Math.abs(v)-t)/(1-t)*Math.sign(v);}
     const lx=dz(gp.axes[0]),ly=dz(gp.axes[1]);
     const ry=dz(gp.axes[3]);
-    let left=Math.round((-ly+lx)*255),right=Math.round((-ly-lx)*255);
+    const curved=applySteeringCurve(lx,-ly);
+    let left=Math.round((curved.dy+curved.dx)*255),right=Math.round((curved.dy-curved.dx)*255);
     left=Math.max(-255,Math.min(255,left));
     right=Math.max(-255,Math.min(255,right));
-    if(joyId==null&&shovelId==null){
+    let padActive=Math.abs(lx)>0.01||Math.abs(ly)>0.01||Math.abs(ry)>0.01||gp.buttons.some(b=>b.pressed);
+    if(padActive&&joyId==null&&shovelId==null){
       motorL=left;motorR=right;
       if(ry!=0){shovelVal=Math.max(0,Math.min(100,shovelVal-Math.round(ry*3)));st.style.bottom=Math.round(shovelVal/100*112)+'px';}
+      lastInputSrc='pad';
+    } else if(lastInputSrc==='pad'){
+      if(joyId==null&&shovelId==null){motorL=0;motorR=0;}
+      lastInputSrc=null;
     }
     let b0=gp.buttons[0].pressed;
     if(b0&&!window.padBtn0Prev)wsSend('L');
@@ -685,6 +721,7 @@ void streamTask(void *pvParameters) {
         continue;
       }
       streamClientCount++;
+      client.setNoDelay(true);
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
       client.println();
@@ -699,6 +736,12 @@ void streamTask(void *pvParameters) {
           esp_camera_fb_return(fb);
           break;
         }
+        size_t headerLen = 64 + String(fb->len).length();
+        if (client.availableForWrite() < (int)(fb->len + headerLen)) {
+          esp_camera_fb_return(fb);
+          delay(5);
+          continue;
+        }
         client.print("--frame\r\n");
         client.print("Content-Type: image/jpeg\r\n");
         client.print("Content-Length: ");
@@ -707,6 +750,7 @@ void streamTask(void *pvParameters) {
         client.write(fb->buf, fb->len);
         client.print("\r\n");
         esp_camera_fb_return(fb);
+        delay(5);
       }
       client.stop();
       streamClientCount--;
