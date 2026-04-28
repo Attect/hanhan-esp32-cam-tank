@@ -674,49 +674,46 @@ function updateKeyMotor(){
 
 // === 手柄 (Gamepad API) ===
 let padConnected=false;
-let padIndex=-1;
-window.addEventListener('gamepadconnected',e=>{
-  padConnected=true;
-  padIndex=e.gamepad.index;
-  console.log('手柄连接 index='+padIndex);
-});
-window.addEventListener('gamepaddisconnected',e=>{
-  padConnected=false;
-  padIndex=-1;
-});
+window.addEventListener('gamepadconnected',e=>{padConnected=true;console.log('手柄连接');});
+window.addEventListener('gamepaddisconnected',e=>{padConnected=false;});
 function pollPad(){
   try{
-    let bestPad=null,bestAct=0;
+    let sumLx=0,sumLy=0,sumRy=0,count=0;
     for(const g of navigator.getGamepads()){
       if(!g)continue;
-      let act=0;
-      for(let i=0;i<Math.min(4,g.axes.length);i++)act+=Math.abs(g.axes[i]||0);
-      for(const b of g.buttons||[])if(b&&b.pressed)act+=1;
-      if(act>bestAct){bestAct=act;bestPad=g;}
+      const axes=g.axes||[];
+      function dz(v){if(v==null)return 0;const a=Math.abs(v);return a<0.15?0:(a-0.15)/0.85*Math.sign(v);}
+      const lx=dz(axes[0]),ly=dz(axes[1]),ry=dz(axes[3]);
+      const anyBtn=(g.buttons||[]).some(b=>b&&b.pressed);
+      if(Math.abs(lx)>0.01||Math.abs(ly)>0.01||Math.abs(ry)>0.01||anyBtn){
+        sumLx+=lx;sumLy+=ly;sumRy+=ry;count++;
+      }
     }
-    if(!bestPad||bestAct<0.01){requestAnimationFrame(pollPad);return;}
-    const axes=bestPad.axes||[];
-    const buttons=bestPad.buttons||[];
-    function dz(v){if(v==null)return 0;const a=Math.abs(v);return a<0.15?0:(a-0.15)/0.85*Math.sign(v);}
-    const lx=dz(axes[0]),ly=dz(axes[1]);
-    const ry=dz(axes[3]);
-    const curved=applySteeringCurve(lx,-ly);
+    if(!window.padBtnPrev)window.padBtnPrev={};
+    for(const g of navigator.getGamepads()){
+      if(!g)continue;
+      let prev=!!window.padBtnPrev[g.index];
+      let curr=!!(g.buttons&&g.buttons[0]&&g.buttons[0].pressed);
+      if(curr&&!prev)wsSend('L');
+      window.padBtnPrev[g.index]=curr;
+    }
+    if(count===0){
+      if(lastInputSrc==='pad'){
+        if(joyId==null&&shovelId==null){motorL=0;motorR=0;}
+        lastInputSrc=null;
+      }
+      requestAnimationFrame(pollPad);return;
+    }
+    const avgLx=sumLx/count,avgLy=sumLy/count,avgRy=sumRy/count;
+    const curved=applySteeringCurve(avgLx,-avgLy);
     let left=Math.round((curved.dy+curved.dx)*255),right=Math.round((curved.dy-curved.dx)*255);
     left=Math.max(-255,Math.min(255,left));
     right=Math.max(-255,Math.min(255,right));
-    const anyBtn=buttons.length?buttons.some(b=>b&&b.pressed):false;
-    const hasInput=Math.abs(lx)>0.01||Math.abs(ly)>0.01||Math.abs(ry)>0.01||anyBtn;
-    if(hasInput&&joyId==null&&shovelId==null){
+    if(joyId==null&&shovelId==null){
       motorL=left;motorR=right;
-      if(Math.abs(ry)>0.01){shovelVal=Math.max(0,Math.min(100,shovelVal-Math.round(ry*3)));st.style.bottom=Math.round(shovelVal/100*112)+'px';}
+      if(Math.abs(avgRy)>0.01){shovelVal=Math.max(0,Math.min(100,shovelVal-Math.round(avgRy*3)));st.style.bottom=Math.round(shovelVal/100*112)+'px';}
       lastInputSrc='pad';
-    }else if(lastInputSrc==='pad'){
-      if(joyId==null&&shovelId==null){motorL=0;motorR=0;}
-      lastInputSrc=null;
     }
-    let b0=buttons[0]&&buttons[0].pressed;
-    if(b0&&!window.padBtn0Prev)wsSend('L');
-    window.padBtn0Prev=b0;
   }catch(err){console.error('pollPad err',err);}
   requestAnimationFrame(pollPad);
 }
