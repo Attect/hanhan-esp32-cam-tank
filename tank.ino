@@ -686,10 +686,17 @@ window.addEventListener('gamepaddisconnected',e=>{
 });
 function pollPad(){
   try{
-    const gp=(padIndex>=0?navigator.getGamepads()[padIndex]:navigator.getGamepads()[0])||navigator.getGamepads().find(g=>g);
-    if(!gp){requestAnimationFrame(pollPad);return;}
-    const axes=gp.axes||[];
-    const buttons=gp.buttons||[];
+    let bestPad=null,bestAct=0;
+    for(const g of navigator.getGamepads()){
+      if(!g)continue;
+      let act=0;
+      for(let i=0;i<Math.min(4,g.axes.length);i++)act+=Math.abs(g.axes[i]||0);
+      for(const b of g.buttons||[])if(b&&b.pressed)act+=1;
+      if(act>bestAct){bestAct=act;bestPad=g;}
+    }
+    if(!bestPad||bestAct<0.01){requestAnimationFrame(pollPad);return;}
+    const axes=bestPad.axes||[];
+    const buttons=bestPad.buttons||[];
     function dz(v){if(v==null)return 0;const a=Math.abs(v);return a<0.15?0:(a-0.15)/0.85*Math.sign(v);}
     const lx=dz(axes[0]),ly=dz(axes[1]);
     const ry=dz(axes[3]);
