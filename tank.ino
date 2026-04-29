@@ -144,7 +144,7 @@ void initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = manualFrameSize;
-  config.jpeg_quality = 14;
+  config.jpeg_quality = 20;
   config.fb_count = 3;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
@@ -819,17 +819,35 @@ void streamTask(void *pvParameters) {
 
         unsigned long w0 = millis();
         bool ok = true;
+
+        // 1) HTTP 头（60 字节左右，很小，一次发）
         size_t w1 = client.write((uint8_t*)header, hlen);
         if (w1 != (size_t)hlen) { ok = false; Serial.printf("[W] hdr fail %u/%d\n", w1, hlen); }
+
+        // 2) JPEG 数据：分块 1KB 写入，每块之间 delay(1) 让 lwip 后台处理 ACK
         size_t w2 = 0;
+        const size_t CHUNK = 1024;
         if (ok) {
-          w2 = client.write(vf.buf, vf.len);
-          if (w2 != vf.len) { ok = false; Serial.printf("[W] data fail %u/%u\n", w2, vf.len); }
+          for (size_t sent = 0; sent < vf.len; ) {
+            size_t toWrite = min(CHUNK, vf.len - sent);
+            size_t n = client.write(vf.buf + sent, toWrite);
+            if (n != toWrite) {
+              ok = false;
+              Serial.printf("[W] chunk fail %u/%u at %u\n", n, toWrite, sent);
+              break;
+            }
+            sent += n;
+            w2 = sent;
+            if (sent < vf.len) delay(1);  // 关键：让出 CPU，让 lwip 发送 + 接收 ACK
+          }
         }
+
+        // 3) 尾部
         if (ok) {
           size_t w3 = client.write((uint8_t*)"\r\n", 2);
           if (w3 != 2) { ok = false; Serial.printf("[W] tail fail %u/2\n", w3); }
         }
+
         unsigned long w1t = millis();
         free(vf.buf);
 
@@ -838,7 +856,7 @@ void streamTask(void *pvParameters) {
           break;
         }
         if (w1t - w0 > 80) {
-          Serial.printf("[W] SLOW len=%u hdr=%u data=%u t=%lums\n", vf.len, w1, w2, w1t - w0);
+          Serial.printf("[W] SLOW len=%u chunks t=%lums\n", vf.len, w1t - w0);
         }
       }
       // 清空队列残留，避免下一位客户端收到旧帧
