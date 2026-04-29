@@ -6,6 +6,7 @@
 #include <WebSocketsServer.h>
 #include <esp_wifi.h>
 #include <driver/gpio.h>
+#include <lwip/sockets.h>
 
 // =================== 用户配置区域 ===================
 // 请修改为你自己的 WiFi 名称和密码
