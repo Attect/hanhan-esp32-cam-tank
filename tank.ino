@@ -735,23 +735,36 @@ QueueHandle_t videoQueue = NULL;
 
 // 固定节拍取帧并放入队列（深度1，覆盖旧帧），与发送完全解耦
 static unsigned long lastCap = 0;
+static uint32_t capCnt = 0;
 void captureFrame() {
   unsigned long now = millis();
   if (!cameraEnabled) return;
   if (now - lastCap < 35) return;  // 目标 ~28FPS
-  lastCap = now;
+  unsigned long t1 = millis();
   camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) return;
+  unsigned long t2 = millis();
+  if (!fb) {
+    Serial.printf("[CAM] fb_get fail dt=%lums\n", t2 - t1);
+    return;
+  }
   VideoFrame vf;
   vf.len = fb->len;
   vf.buf = (uint8_t*)malloc(vf.len);
-  if (vf.buf) {
-    memcpy(vf.buf, fb->buf, vf.len);
-    VideoFrame old;
-    if (xQueueReceive(videoQueue, &old, 0) == pdTRUE) free(old.buf);
-    xQueueSend(videoQueue, &vf, 0);
+  if (!vf.buf) {
+    Serial.printf("[CAM] malloc fail len=%u\n", vf.len);
+    esp_camera_fb_return(fb);
+    return;
   }
+  memcpy(vf.buf, fb->buf, vf.len);
+  VideoFrame old;
+  if (xQueueReceive(videoQueue, &old, 0) == pdTRUE) free(old.buf);
+  xQueueSend(videoQueue, &vf, 0);
   esp_camera_fb_return(fb);
+  lastCap = now;
+  capCnt++;
+  if (capCnt % 30 == 0) {
+    Serial.printf("[CAP] ok len=%u fb=%lums q=%lu\n", vf.len, t2 - t1, uxQueueMessagesWaiting(videoQueue));
+  }
 }
 
 void streamTask(void *pvParameters) {
@@ -768,6 +781,7 @@ void streamTask(void *pvParameters) {
         continue;
       }
       streamClientCount++;
+      Serial.printf("[CONN] client ip=%s queue=%lu\n", client.remoteIP().toString().c_str(), uxQueueMessagesWaiting(videoQueue));
       client.setNoDelay(true);      // 禁用 Nagle，小包立即发送
       client.setTimeout(200);       // 发送超时 200ms，避免慢客户端阻塞
       client.println("HTTP/1.1 200 OK");
@@ -775,6 +789,7 @@ void streamTask(void *pvParameters) {
       client.println("Connection: close");
       client.println();
 
+      uint32_t emptyCnt = 0;
       while (client.connected()) {
         if (!cameraEnabled) break;
 
@@ -782,29 +797,57 @@ void streamTask(void *pvParameters) {
         captureFrame();
 
         VideoFrame vf;
-        // 短暂等待新帧（10ms），让出 CPU，同时保持高频轮询
-        if (xQueueReceive(videoQueue, &vf, pdMS_TO_TICKS(10)) == pdTRUE) {
-          if (!client.connected()) { free(vf.buf); break; }
+        unsigned long q0 = millis();
+        bool hasFrame = (xQueueReceive(videoQueue, &vf, pdMS_TO_TICKS(10)) == pdTRUE);
+        unsigned long q1 = millis();
 
-          // 批量构建 HTTP 头，一次性 write
-          char header[128];
-          int hlen = snprintf(header, sizeof(header),
-            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned)vf.len);
+        if (!hasFrame) {
+          emptyCnt++;
+          if (emptyCnt % 50 == 0) {
+            Serial.printf("[Q] empty x%u cap=%lu\n", emptyCnt, capCnt);
+          }
+          continue;
+        }
+        emptyCnt = 0;
 
-          bool ok = true;
-          if ((size_t)client.write((uint8_t*)header, hlen) != (size_t)hlen) ok = false;
-          if (ok && client.write(vf.buf, vf.len) != vf.len) ok = false;
-          if (ok && client.write((uint8_t*)"\r\n", 2) != 2) ok = false;
+        if (!client.connected()) { free(vf.buf); break; }
 
-          free(vf.buf);
-          if (!ok) break;  // 发送失败立即结束，避免死等
+        // 批量构建 HTTP 头，一次性 write
+        char header[128];
+        int hlen = snprintf(header, sizeof(header),
+          "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned)vf.len);
+
+        unsigned long w0 = millis();
+        bool ok = true;
+        size_t w1 = client.write((uint8_t*)header, hlen);
+        if (w1 != (size_t)hlen) { ok = false; Serial.printf("[W] hdr fail %u/%d\n", w1, hlen); }
+        size_t w2 = 0;
+        if (ok) {
+          w2 = client.write(vf.buf, vf.len);
+          if (w2 != vf.len) { ok = false; Serial.printf("[W] data fail %u/%u\n", w2, vf.len); }
+        }
+        if (ok) {
+          size_t w3 = client.write((uint8_t*)"\r\n", 2);
+          if (w3 != 2) { ok = false; Serial.printf("[W] tail fail %u/2\n", w3); }
+        }
+        unsigned long w1t = millis();
+        free(vf.buf);
+
+        if (!ok) {
+          Serial.printf("[W] break after %lums\n", w1t - w0);
+          break;
+        }
+        if (w1t - w0 > 80) {
+          Serial.printf("[W] SLOW len=%u hdr=%u data=%u t=%lums\n", vf.len, w1, w2, w1t - w0);
         }
       }
       // 清空队列残留，避免下一位客户端收到旧帧
       VideoFrame leftover;
-      while (xQueueReceive(videoQueue, &leftover, 0) == pdTRUE) free(leftover.buf);
+      uint32_t dropped = 0;
+      while (xQueueReceive(videoQueue, &leftover, 0) == pdTRUE) { free(leftover.buf); dropped++; }
       client.stop();
       streamClientCount--;
+      Serial.printf("[DISC] dropped=%u cap=%lu\n", dropped, capCnt);
     }
     delay(5);
   }
