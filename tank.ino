@@ -782,7 +782,8 @@ void streamTask(void *pvParameters) {
         continue;
       }
       streamClientCount++;
-      Serial.printf("[CONN] client ip=%s queue=%lu\n", client.remoteIP().toString().c_str(), uxQueueMessagesWaiting(videoQueue));
+      Serial.printf("[CONN] client ip=%s queue=%lu rssi=%d\n",
+        client.remoteIP().toString().c_str(), uxQueueMessagesWaiting(videoQueue), WiFi.RSSI());
       client.setNoDelay(true);      // 禁用 Nagle，小包立即发送
       client.setTimeout(200);       // 发送超时 200ms，避免慢客户端阻塞
       // 关键：增大 TCP 发送缓冲区到 32KB，让整帧一次性入队，不受 Delayed ACK 影响
@@ -890,6 +891,8 @@ void setup() {
   initCamera();
   Serial.println("硬件初始化完毕");
 
+  WiFi.setSleep(false);               // 禁用 WiFi 省电模式，避免 Modem-sleep 间歇唤醒延迟
+  WiFi.setPhyMode(WIFI_PHY_MODE_11G); // 强制 802.11g，兼容性更好，避免 11n 协商异常
   WiFi.begin(ssid, password);
   Serial.print("连接Wi-Fi");
   unsigned long wifiStartTime = millis();
