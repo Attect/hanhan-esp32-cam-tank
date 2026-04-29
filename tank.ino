@@ -144,8 +144,8 @@ void initCamera() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = manualFrameSize;
-  config.jpeg_quality = 12;
-  config.fb_count = 2;
+  config.jpeg_quality = 14;
+  config.fb_count = 3;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
@@ -726,44 +726,87 @@ pollPad();
 }
 
 // =================== 视频流任务 ===================
+// 帧缓冲队列（异步解耦取帧与发送），深度1只保留最新帧
+struct VideoFrame {
+  uint8_t* buf;
+  size_t len;
+};
+QueueHandle_t videoQueue = NULL;
+
+// 固定节拍取帧并放入队列（深度1，覆盖旧帧），与发送完全解耦
+static unsigned long lastCap = 0;
+void captureFrame() {
+  unsigned long now = millis();
+  if (!cameraEnabled) return;
+  if (now - lastCap < 35) return;  // 目标 ~28FPS
+  lastCap = now;
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) return;
+  VideoFrame vf;
+  vf.len = fb->len;
+  vf.buf = (uint8_t*)malloc(vf.len);
+  if (vf.buf) {
+    memcpy(vf.buf, fb->buf, vf.len);
+    VideoFrame old;
+    if (xQueueReceive(videoQueue, &old, 0) == pdTRUE) free(old.buf);
+    xQueueSend(videoQueue, &vf, 0);
+  }
+  esp_camera_fb_return(fb);
+}
+
 void streamTask(void *pvParameters) {
   while (1) {
+    // 1. 无客户端时也要取帧（丢弃旧帧，保持队列新鲜）
+    captureFrame();
+
+    // 2. 处理 HTTP MJPEG 客户端
     WiFiClient client = streamServer.available();
     if (client) {
       if (!cameraEnabled) {
         client.stop();
-        delay(10);
+        delay(5);
         continue;
       }
       streamClientCount++;
+      client.setNoDelay(true);      // 禁用 Nagle，小包立即发送
+      client.setTimeout(200);       // 发送超时 200ms，避免慢客户端阻塞
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+      client.println("Connection: close");
       client.println();
+
       while (client.connected()) {
         if (!cameraEnabled) break;
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
-          delay(10);
-          continue;
+
+        // 关键：发送期间也要持续取帧，避免 write 阻塞时画面 freeze
+        captureFrame();
+
+        VideoFrame vf;
+        // 短暂等待新帧（10ms），让出 CPU，同时保持高频轮询
+        if (xQueueReceive(videoQueue, &vf, pdMS_TO_TICKS(10)) == pdTRUE) {
+          if (!client.connected()) { free(vf.buf); break; }
+
+          // 批量构建 HTTP 头，一次性 write
+          char header[128];
+          int hlen = snprintf(header, sizeof(header),
+            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", (unsigned)vf.len);
+
+          bool ok = true;
+          if ((size_t)client.write((uint8_t*)header, hlen) != (size_t)hlen) ok = false;
+          if (ok && client.write(vf.buf, vf.len) != vf.len) ok = false;
+          if (ok && client.write((uint8_t*)"\r\n", 2) != 2) ok = false;
+
+          free(vf.buf);
+          if (!ok) break;  // 发送失败立即结束，避免死等
         }
-        if (!client.connected()) {
-          esp_camera_fb_return(fb);
-          break;
-        }
-        client.print("--frame\r\n");
-        client.print("Content-Type: image/jpeg\r\n");
-        client.print("Content-Length: ");
-        client.print(fb->len);
-        client.print("\r\n\r\n");
-        client.write(fb->buf, fb->len);
-        client.print("\r\n");
-        esp_camera_fb_return(fb);
-        delay(5);
       }
+      // 清空队列残留，避免下一位客户端收到旧帧
+      VideoFrame leftover;
+      while (xQueueReceive(videoQueue, &leftover, 0) == pdTRUE) free(leftover.buf);
       client.stop();
       streamClientCount--;
     }
-    delay(10);
+    delay(5);
   }
 }
 
@@ -814,6 +857,7 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
+  videoQueue = xQueueCreate(1, sizeof(VideoFrame));
   xTaskCreatePinnedToCore(streamTask, "StreamTask", 8192, NULL, 1, &streamTaskHandle, 1);
 }
 
