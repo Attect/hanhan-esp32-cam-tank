@@ -763,9 +763,6 @@ void captureFrame() {
   esp_camera_fb_return(fb);
   lastCap = now;
   capCnt++;
-  if (capCnt % 30 == 0) {
-    Serial.printf("[CAP] ok len=%u fb=%lums q=%lu\n", vf.len, t2 - t1, uxQueueMessagesWaiting(videoQueue));
-  }
 }
 
 void streamTask(void *pvParameters) {
@@ -782,8 +779,7 @@ void streamTask(void *pvParameters) {
         continue;
       }
       streamClientCount++;
-      Serial.printf("[CONN] client ip=%s queue=%lu rssi=%d\n",
-        client.remoteIP().toString().c_str(), uxQueueMessagesWaiting(videoQueue), WiFi.RSSI());
+      Serial.printf("[CONN] ip=%s rssi=%d\n", client.remoteIP().toString().c_str(), WiFi.RSSI());
       client.setNoDelay(true);      // 禁用 Nagle，小包立即发送
       client.setTimeout(200);       // 发送超时 200ms，避免慢客户端阻塞
       // 关键：增大 TCP 发送缓冲区到 32KB，让整帧一次性入队，不受 Delayed ACK 影响
@@ -811,8 +807,8 @@ void streamTask(void *pvParameters) {
 
         if (!hasFrame) {
           emptyCnt++;
-          if (emptyCnt % 50 == 0) {
-            Serial.printf("[Q] empty x%u cap=%lu\n", emptyCnt, capCnt);
+          if (emptyCnt % 200 == 0) {
+            Serial.printf("[Q] empty x%u\n", emptyCnt);
           }
           continue;
         }
@@ -863,17 +859,16 @@ void streamTask(void *pvParameters) {
           Serial.printf("[W] break after %lums\n", w1t - w0);
           break;
         }
-        if (w1t - w0 > 80) {
-          Serial.printf("[W] SLOW len=%u chunks t=%lums\n", vf.len, w1t - w0);
+        if (w1t - w0 > 250) {
+          Serial.printf("[W] SLOW len=%u t=%lums\n", vf.len, w1t - w0);
         }
       }
       // 清空队列残留，避免下一位客户端收到旧帧
       VideoFrame leftover;
-      uint32_t dropped = 0;
-      while (xQueueReceive(videoQueue, &leftover, 0) == pdTRUE) { free(leftover.buf); dropped++; }
+      while (xQueueReceive(videoQueue, &leftover, 0) == pdTRUE) free(leftover.buf);
       client.stop();
       streamClientCount--;
-      Serial.printf("[DISC] dropped=%u cap=%lu\n", dropped, capCnt);
+      Serial.println("[DISC]");
     }
     delay(5);
   }
