@@ -784,6 +784,12 @@ void streamTask(void *pvParameters) {
       Serial.printf("[CONN] client ip=%s queue=%lu\n", client.remoteIP().toString().c_str(), uxQueueMessagesWaiting(videoQueue));
       client.setNoDelay(true);      // 禁用 Nagle，小包立即发送
       client.setTimeout(200);       // 发送超时 200ms，避免慢客户端阻塞
+      // 关键：增大 TCP 发送缓冲区到 32KB，让整帧一次性入队，不受 Delayed ACK 影响
+      int fd = client.fd();
+      if (fd >= 0) {
+        int sndbuf = 32768;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+      }
       client.println("HTTP/1.1 200 OK");
       client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
       client.println("Connection: close");
