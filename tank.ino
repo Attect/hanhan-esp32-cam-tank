@@ -892,7 +892,6 @@ void setup() {
   Serial.println("硬件初始化完毕");
 
   WiFi.setSleep(false);               // 禁用 WiFi 省电模式，避免 Modem-sleep 间歇唤醒延迟
-  WiFi.setPhyMode(WIFI_PHY_MODE_11G); // 强制 802.11g，兼容性更好，避免 11n 协商异常
   WiFi.begin(ssid, password);
   Serial.print("连接Wi-Fi");
   unsigned long wifiStartTime = millis();
@@ -916,6 +915,13 @@ void setup() {
   Serial.println("\nWiFi 连接成功");
   Serial.print("IP 地址: ");
   Serial.println(WiFi.localIP());
+  // 强制 802.11b/g，禁用 11n，避免部分路由器协商异常导致速率暴跌
+  esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+  if (err != ESP_OK) {
+    Serial.printf("WiFi 协议设置失败: 0x%x\n", err);
+  } else {
+    Serial.println("WiFi 协议已锁定为 11b/g");
+  }
   setLightBrightness(0);  // 连接成功后关灯
 
   server.on("/", handleRoot);
